@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SentinelWall — Threat Detection Dashboard</title>
+<link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">SENTINEL<span>WALL</span></div>
+  <div class="status"><span class="dot"></span> Live Analysis</div>
+  <div class="version">v1.0.0</div>
+</header>
+
+<div class="wrap">
+  <!-- Overview cards -->
+  <div class="cards">
+    <div class="card card-events"><div class="value" id="stat-events">–</div><div class="label">Events Processed</div></div>
+    <div class="card card-clusters"><div class="value" id="stat-clusters">–</div><div class="label">Threat Clusters</div></div>
+    <div class="card card-alerts"><div class="value" id="stat-alerts">–</div><div class="label">Alerts Generated</div></div>
+    <div class="card card-techniques"><div class="value" id="stat-techniques">–</div><div class="label">ATT&amp;CK Techniques</div></div>
+    <div class="card card-throughput"><div class="value" id="stat-throughput">–</div><div class="label">Events / Sec</div></div>
+  </div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <h2>Threat Narrative</h2>
+      <div class="narrative" id="narrative"><div class="muted">Loading…</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Severity Distribution</h2>
+      <div id="severity-chart"><div class="muted">Loading…</div></div>
+    </section>
+  </div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <h2>MITRE ATT&amp;CK Techniques</h2>
+      <div id="techniques"><div class="muted">Loading…</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Protocol Distribution</h2>
+      <div id="protocols"><div class="muted">Loading…</div></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>Correlated Threat Clusters</h2>
+    <table id="clusters-table">
+      <thead>
+        <tr><th>Severity</th><th>Labels</th><th>Techniques</th><th>Events</th><th>Description</th></tr>
+      </thead>
+      <tbody><tr><td class="muted" colspan="5">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Attack Timeline</h2>
+    <div id="timeline"><div class="muted">Loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Recent Events</h2>
+    <table id="events-table">
+      <thead>
+        <tr><th>Time</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Type</th><th>Severity</th><th>Bytes</th></tr>
+      </thead>
+      <tbody><tr><td class="muted" colspan="7">Loading…</td></tr></tbody>
+    </table>
+  </section>
+</div>
+
+<footer class="footer">
+  SentinelWall v1.0.0 — MIT Licensed — MITRE ATT&CK based threat correlation
+</footer>
+
+<script src="/static/js/dashboard.js"></script>
+</body>
+</html>
