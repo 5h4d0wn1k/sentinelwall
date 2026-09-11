@@ -58,10 +58,13 @@ class AnomalyDetector:
     def is_trained(self) -> bool:
         return self._is_trained
 
+    TRAIN_SAMPLE_CAP = 4096
+
     def train(self, events: list[NetworkEvent]) -> dict[str, Any]:
         """Train baselines from historical events."""
         if not events:
             return {"status": "no_data", "samples": 0}
+        events = events[-self.TRAIN_SAMPLE_CAP:]
         self._build_host_baselines(events)
         self._build_port_frequency(events)
         self._build_protocol_distribution(events)
@@ -171,8 +174,9 @@ class AnomalyDetector:
     def _compute_isolation_score(self, features: list[float]) -> float:
         if not self._feature_vectors:
             return 0.0
+        reference = self._feature_vectors[:512]
         distances = []
-        for vf in self._feature_vectors:
+        for vf in reference:
             dist = sum((a - b) ** 2 for a, b in zip(features, vf)) ** 0.5
             distances.append(dist)
         distances.sort()
@@ -180,8 +184,8 @@ class AnomalyDetector:
         avg_knn = sum(distances[:k]) / k
         max_possible = max(
             max(abs(a - b) for a, b in zip(features, vf))
-            for vf in self._feature_vectors[:100]
-        ) if self._feature_vectors else 1.0
+            for vf in reference
+        ) if reference else 1.0
         if max_possible == 0:
             return 0.0
         return min(1.0, avg_knn / max_possible)

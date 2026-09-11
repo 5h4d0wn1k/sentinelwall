@@ -307,7 +307,7 @@ class NarrativeGenerator:
     ) -> list[NarrativeSegment]:
         segments = []
         phase_events = defaultdict(list)
-        for event in events:
+        for event in events[-5000:]:
             phase = self._event_to_phase(event)
             phase_events[phase].append(event)
         for cluster in clusters:

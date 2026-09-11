@@ -85,6 +85,8 @@ class EventCorrelator:
         self._clusters: list[CorrelatedCluster] = []
         self._event_buffer: list[NetworkEvent] = []
         self._beacon_tracker: dict[str, list[datetime]] = defaultdict(list)
+        self._beacon_checked: set[str] = set()
+        self._host_index: dict[str, list[NetworkEvent]] = defaultdict(list)
         self._analysis_time: datetime = datetime(1970, 1, 1, tzinfo=timezone.utc)
         self._first_event_time: datetime | None = None
         self._cooldown: dict[str, datetime] = defaultdict(
@@ -123,6 +125,7 @@ class EventCorrelator:
     def _update_caches(self, event: NetworkEvent) -> None:
         flow_key = event.correlate_key()
         self._flow_cache[flow_key].append(event)
+        self._host_index[event.source_ip].append(event)
         self._host_connections[event.source_ip].add(event.destination_ip)
         self._host_connections[event.destination_ip].add(event.source_ip)
         self._port_access[event.source_ip].add(event.destination_port)
@@ -131,9 +134,15 @@ class EventCorrelator:
             for answer in answers:
                 if isinstance(answer, dict):
                     self._dns_cache[answer.get("name", "")] = answer.get("ip", "")
-        self._beacon_tracker[
-            f"{event.source_ip}|{event.destination_ip}|{event.destination_port}"
-        ].append(event.timestamp)
+        if event.event_type in (
+            EventType.C2_BEACON, EventType.HTTP_REQUEST, EventType.TLS_HANDSHAKE,
+            EventType.ENCRYPTED_TRANSFER, EventType.CONNECTION,
+        ):
+            tracker = self._beacon_tracker[
+                f"{event.source_ip}|{event.destination_ip}|{event.destination_port}"
+            ]
+            if len(tracker) < 64:
+                tracker.append(event.timestamp)
 
     def _detect_port_scan(self, event: NetworkEvent) -> list[CorrelatedCluster]:
         clusters = []
@@ -158,36 +167,45 @@ class EventCorrelator:
 
     def _detect_c2_beacon(self, event: NetworkEvent) -> list[CorrelatedCluster]:
         clusters = []
+        if event.event_type not in (
+            EventType.C2_BEACON, EventType.HTTP_REQUEST, EventType.TLS_HANDSHAKE,
+            EventType.ENCRYPTED_TRANSFER, EventType.CONNECTION,
+        ):
+            return clusters
         beacon_key = f"{event.source_ip}|{event.destination_ip}|{event.destination_port}"
+        if beacon_key in self._beacon_checked:
+            return clusters
         timestamps = self._beacon_tracker.get(beacon_key, [])
-        if len(timestamps) >= self.BEACON_MIN_SAMPLES:
-            intervals = []
-            sorted_ts = sorted(timestamps)
-            for i in range(1, len(sorted_ts)):
-                delta = (sorted_ts[i] - sorted_ts[i - 1]).total_seconds()
-                if 0 < delta < 3600:
-                    intervals.append(delta)
-            if len(intervals) >= 3:
-                mean_interval = sum(intervals) / len(intervals)
-                if mean_interval > 0:
-                    variance = sum((x - mean_interval) ** 2 for x in intervals) / len(intervals)
-                    cv = (variance ** 0.5) / mean_interval if mean_interval > 0 else float("inf")
-                    if cv < 0.3 and mean_interval > 10:
-                        if self._in_cooldown(event.source_ip, "T1071", seconds=600, ref=event.timestamp):
-                            return clusters
-                        cluster = self._create_cluster(
-                            events=self._get_flow_events_by_key(beacon_key),
-                            severity=Severity.CRITICAL,
-                            techniques=["T1071", "T1572"],
-                            labels=["c2-beacon", "command-and-control"],
-                            description=(
-                                f"Regular beaconing detected from {event.source_ip} to "
-                                f"{event.destination_ip} — interval ~{mean_interval:.0f}s "
-                                f"(CV={cv:.2f}), consistent with C2 callback "
-                                f"(MITRE T1071: Application Layer Protocol, T1572: Protocol Tunneling)"
-                            ),
-                        )
-                        clusters.append(cluster)
+        if len(timestamps) < self.BEACON_MIN_SAMPLES:
+            return clusters
+        self._beacon_checked.add(beacon_key)
+        sorted_ts = timestamps if timestamps == sorted(timestamps) else sorted(timestamps)
+        intervals = []
+        for i in range(1, len(sorted_ts)):
+            delta = (sorted_ts[i] - sorted_ts[i - 1]).total_seconds()
+            if 0 < delta < 3600:
+                intervals.append(delta)
+        if len(intervals) >= 3:
+            mean_interval = sum(intervals) / len(intervals)
+            if mean_interval > 0:
+                variance = sum((x - mean_interval) ** 2 for x in intervals) / len(intervals)
+                cv = (variance ** 0.5) / mean_interval if mean_interval > 0 else float("inf")
+                if cv < 0.3 and mean_interval > 10:
+                    if self._in_cooldown(event.source_ip, "T1071", seconds=600, ref=event.timestamp):
+                        return clusters
+                    cluster = self._create_cluster(
+                        events=self._get_flow_events_by_key(beacon_key),
+                        severity=Severity.CRITICAL,
+                        techniques=["T1071", "T1572"],
+                        labels=["c2-beacon", "command-and-control"],
+                        description=(
+                            f"Regular beaconing detected from {event.source_ip} to "
+                            f"{event.destination_ip} — interval ~{mean_interval:.0f}s "
+                            f"(CV={cv:.2f}), consistent with C2 callback "
+                            f"(MITRE T1071: Application Layer Protocol, T1572: Protocol Tunneling)"
+                        ),
+                    )
+                    clusters.append(cluster)
         return clusters
 
     def _detect_lateral_movement(self, event: NetworkEvent) -> list[CorrelatedCluster]:
@@ -298,10 +316,13 @@ class EventCorrelator:
 
     def _detect_escaped_sequence(self, event: NetworkEvent) -> list[CorrelatedCluster]:
         clusters = []
+        if event.event_type not in (EventType.AUTH_FAILURE, EventType.AUTH_SUCCESS):
+            return clusters
+        cutoff = event.timestamp - timedelta(seconds=60)
         src_events = [
-            e for e in self._event_buffer
-            if e.source_ip == event.source_ip and e.timestamp > event.timestamp - timedelta(seconds=60)
-        ]
+            e for e in self._host_index.get(event.source_ip, [])
+            if e.timestamp > cutoff
+        ][-200:]
         if len(src_events) < 3:
             return clusters
         event_types = [e.event_type for e in src_events]
@@ -327,25 +348,21 @@ class EventCorrelator:
         ref = ref or self._analysis_time
         cutoff = ref - timedelta(seconds=seconds)
         ports = set()
-        seen = 0
-        for event in reversed(self._event_buffer):
-            if event.source_ip != ip:
-                continue
-            seen += 1
-            if seen > 500:
-                break
+        for event in reversed(self._host_index.get(ip, [])[-1000:]):
             if event.timestamp < cutoff:
-                continue
+                break
             ports.add(event.destination_port)
         return ports
 
     def _get_recent_events(self, ip: str, seconds: int = 10, ref: datetime | None = None) -> list[NetworkEvent]:
         ref = ref or self._analysis_time
         cutoff = ref - timedelta(seconds=seconds)
-        return [
-            e for e in self._event_buffer
-            if e.source_ip == ip and ref - timedelta(seconds=3600) <= e.timestamp <= ref
-        ][:500]
+        out = []
+        for event in reversed(self._host_index.get(ip, [])[-1000:]):
+            if event.timestamp < cutoff:
+                break
+            out.append(event)
+        return list(reversed(out))[:500]
 
     def _get_flow_events(self, flow_key: str) -> list[NetworkEvent]:
         return list(self._flow_cache.get(flow_key, []))
@@ -371,7 +388,7 @@ class EventCorrelator:
         return False
 
     def _get_host_events(self, ip: str) -> list[NetworkEvent]:
-        return [e for e in self._event_buffer if e.source_ip == ip]
+        return list(self._host_index.get(ip, []))[:1000]
 
     def _create_cluster(
         self,

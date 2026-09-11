@@ -42,8 +42,8 @@ class PcapReader:
             endian = ">"
         elif int.from_bytes(data[:4], "big") == 0xD4C3B2A1:
             endian = ">"
-        version_major, version_minor, thiszone, sigfigs, snaplen, network = struct.unpack(
-            endian + "HHIIII", data[0:24]
+        _magic, version_major, version_minor, thiszone, sigfigs, snaplen, network = struct.unpack(
+            endian + "IHHiIII", data[0:24]
         )
         linktype = network
         events = []
@@ -307,8 +307,7 @@ class PcapReader:
             socket.inet_aton(event.source_ip) if _valid_ipv4(event.source_ip) else b"\x0a\x00\x00\x01",
             socket.inet_aton(event.destination_ip) if _valid_ipv4(event.destination_ip) else b"\x0a\x00\x00\x02",
         )
-        tcp = struct.pack(">HHII", event.source_port, event.destination_port, 1000, 2000)
-        tcp += struct.pack(">BBH", 0x50, 0x18, 0)
+        tcp = struct.pack(">HHIIBBHHH", event.source_port, event.destination_port, 1000, 2000, 0x50, 0x18, 0, 0, 0)
         payload = event.raw_data[:1400] if event.raw_data else b"P" * min(event.payload_size, 50)
         tcp += payload
         return eth + header + tcp

@@ -26,11 +26,9 @@ class RuleCondition:
 
     def _compare(self, actual: Any, expected: Any) -> bool:
         if self.operator == "eq":
-            if isinstance(expected, str) and isinstance(actual, str):
-                return actual.lower() == expected.lower()
-            return actual == expected
+            return self._compare_eq(actual, expected)
         if self.operator == "neq":
-            return not self._compare(actual, expected)
+            return not self._compare_eq(actual, expected)
         if self.operator == "gt":
             return float(actual) > float(expected)
         if self.operator == "gte":
@@ -54,6 +52,22 @@ class RuleCondition:
                 return float(expected[0]) <= float(actual) <= float(expected[1])
             return False
         return False
+
+    @staticmethod
+    def _compare_eq(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, str) and isinstance(actual, str):
+            return actual.lower() == expected.lower()
+        if isinstance(expected, str):
+            try:
+                if isinstance(actual, bool):
+                    return actual == (expected.lower() == "true")
+                if isinstance(actual, int):
+                    return actual == int(expected)
+                if isinstance(actual, float):
+                    return actual == float(expected)
+            except (ValueError, TypeError):
+                pass
+        return actual == expected
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -242,16 +256,15 @@ class RuleParser:
         if not cond_match:
             return conditions, logic
         cond_block = cond_match.group(1).strip()
-        logic_match = re.match(r'(or|and)\s+condition:', cond_block, re.IGNORECASE)
-        if logic_match:
-            logic = logic_match.group(1).lower()
-            cond_block = cond_block[logic_match.end():].strip()
         lines = [l.strip() for l in cond_block.split("\n") if l.strip() and l.strip() != "}"]
         for line in lines:
             line = re.sub(r'^(AND|OR)\s+', '', line, flags=re.IGNORECASE).strip()
             cond = self._parse_condition(line)
             if cond:
                 conditions.append(cond)
+        logic_match = re.search(r'^\s*(?P<logic>or|and)\s+condition:', text, re.IGNORECASE | re.MULTILINE)
+        if logic_match:
+            logic = logic_match.group("logic").lower()
         return conditions, logic
 
     def _parse_condition(self, text: str) -> RuleCondition | None:
@@ -274,18 +287,31 @@ class RuleParser:
                         value=self._coerce_value(value_str),
                         negated=negated,
                     )
-        for op_name in ("contains", "not_contains", "matches", "in", "between"):
-            pattern = rf'(\w+)\s+{op_name}\s+(.+)'
-            match = re.match(pattern, text, re.IGNORECASE)
-            if match:
-                field_name = match.group(1)
-                value_str = match.group(2).strip()
-                return RuleCondition(
-                    field=field_name,
-                    operator=op_name,
-                    value=self._coerce_value(value_str),
-                    negated=negated,
-                )
+        between = re.match(r'(\w+)\s+between\s+\[([^\]]+)\]', text, re.IGNORECASE)
+        if between:
+            field_name = between.group(1)
+            items = [self._coerce_value(v.strip()) for v in between.group(2).split(",") if v.strip()]
+            return RuleCondition(
+                field=field_name,
+                operator="between",
+                value=items,
+                negated=negated,
+            )
+        word = re.match(
+            r'(\w+)\s+(gte|gt|lte|lt|neq|eq|not_contains|contains|matches|in)\s+(.+)',
+            text,
+            re.IGNORECASE,
+        )
+        if word:
+            field_name = word.group(1)
+            op_name = word.group(2).lower()
+            value_str = word.group(3).strip()
+            return RuleCondition(
+                field=field_name,
+                operator=op_name,
+                value=self._coerce_value(value_str),
+                negated=negated,
+            )
         return None
 
     def _coerce_value(self, value_str: str) -> Any:

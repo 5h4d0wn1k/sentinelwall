@@ -111,6 +111,8 @@ class NetworkEvent:
     tags: list[str] = field(default_factory=list)
     raw_data: bytes = b""
     confidence: float = 1.0
+    _direction: str | None = field(init=False, default=None)
+    _lateral_candidate: bool | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if isinstance(self.protocol, str):
@@ -123,7 +125,9 @@ class NetworkEvent:
     @property
     def direction(self) -> str:
         """Classify traffic direction from RFC 1918 perspective."""
-        return "inbound" if _is_external(self.source_ip) else "outbound"
+        if self._direction is None:
+            self._direction = "inbound" if _is_external(self.source_ip) else "outbound"
+        return self._direction
 
     @property
     def hash(self) -> str:
@@ -137,9 +141,11 @@ class NetworkEvent:
 
     @property
     def lateral_movement_candidate(self) -> bool:
-        internal = not _is_external(self.source_ip) and not _is_external(self.destination_ip)
-        interesting_ports = {22, 23, 3389, 445, 139, 5985, 5986, 135}
-        return internal and self.destination_port in interesting_ports
+        if self._lateral_candidate is None:
+            internal = not _is_external(self.source_ip) and not _is_external(self.destination_ip)
+            interesting_ports = {22, 23, 3389, 445, 139, 5985, 5986, 135}
+            self._lateral_candidate = internal and self.destination_port in interesting_ports
+        return self._lateral_candidate
 
     def to_dict(self) -> dict[str, Any]:
         return {

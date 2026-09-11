@@ -142,13 +142,13 @@ class ZeekImporter:
             query = row.get("query", "")
             answers = row.get("answers", "")
             qtype = row.get("qtype_name", row.get("qtype", ""))
-            event_type = EventType.DNS_RESPONSE if answers else EventType.DNS_QUERY
+            event_type = EventType.DNS_RESPONSE if answers and answers.strip() not in ("", "-") else EventType.DNS_QUERY
             rcode = row.get("rcode_name", "")
             metadata = {
                 "query_name": query,
                 "qtype": qtype,
                 "rcode": rcode,
-                "answers": [{"type": qtype, "name": a} for a in answers.split(",") if a],
+                "answers": [{"type": qtype, "name": a} for a in answers.split(",") if a and a.strip() not in ("", "-")],
             }
             return NetworkEvent(
                 timestamp=ts, source_ip=src, destination_ip=dst,

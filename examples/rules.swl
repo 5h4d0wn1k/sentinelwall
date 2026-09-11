@@ -1,0 +1,28 @@
+rule brute_force_auth_failure:
+    meta:
+        description = "Authentication failure detected — potential brute force attempt"
+        severity = HIGH
+        techniques = ["T1110"]
+        tags = ["brute-force", "credential-access"]
+    condition:
+        event_type == AUTH_FAILURE
+
+rule ssh_monitor:
+    meta:
+        description = "Detect SSH access to internal hosts"
+        severity = HIGH
+        techniques = ["T1021", "T1133"]
+        tags = ["ssh", "remote-access"]
+    condition:
+        protocol == ssh
+        AND destination_port eq 22
+
+rule large_exfil:
+    meta:
+        description = "Large encrypted transfer — possible data exfiltration"
+        severity = HIGH
+        techniques = ["T1048", "T1560"]
+        tags = ["exfiltration"]
+    condition:
+        event_type == ENCRYPTED_TRANSFER
+        AND payload_size > 100000
