@@ -53,6 +53,7 @@ class EventType(Enum):
     ENCRYPTED_TRANSFER = auto()
     AUTH_FAILURE = auto()
     AUTH_SUCCESS = auto()
+    NOTICE = auto()
     ANOMALOUS_TRAFFIC = auto()
     SUSPICIOUS_DNS = auto()
     C2_BEACON = auto()

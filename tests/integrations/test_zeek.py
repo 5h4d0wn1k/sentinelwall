@@ -168,3 +168,85 @@ class TestEdgeCases:
         importer = ZeekImporter()
         dt = importer._parse_ts("1700000000.500000")
         assert dt.timestamp() == pytest.approx(1700000000.5)
+
+class TestSupportedLogsContract:
+    """Every advertised SUPPORTED_LOGS entry has a handler (#19).
+
+    notice.log and weird.log were listed but unimplemented: reading them
+    reported success and yielded zero events with no diagnostic. This pins
+    one representative row per entry so the list and _convert_row cannot
+    drift apart again.
+    """
+
+    REPRESENTATIVE = {
+        "conn.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tconn_state\torig_bytes\tresp_bytes\tduration\tservice\thistory\n"
+            "1700000000.0\tC1\t10.0.0.5\t52000\t8.8.8.8\t53\tudp\tSF\t100\t200\t1.0\tdns\tDd\n"
+        ),
+        "dns.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tquery\tqtype_name\tanswers\n"
+            "1700000000.0\tD1\t10.0.0.5\t52000\t8.8.8.8\t53\tgoogle.com\tA\t7.8.7.8\n"
+        ),
+        "http.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tmethod\thost\turi\tstatus_code\tuser_agent\treferrer\tresponse_body_len\n"
+            "1700000000.0\tH1\t10.0.0.5\t52000\t93.1.1.1\t80\tGET\tevil.example\t/x\t200\tcurl\t-\t512\n"
+        ),
+        "ssl.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tserver_name\tversion\tcipher\testablished\n"
+            "1700000000.0\tS1\t10.0.0.5\t52000\t93.1.1.1\t443\tevil.example\tTLSv12\tAES128\tT\n"
+        ),
+        "ssh.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tversion\tauth_success\tauth_attempts\n"
+            "1700000000.0\tK1\t185.1.1.1\t52000\t10.0.0.5\t22\tSSH-2.0\tF\t3\n"
+        ),
+        "smb.log": (
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\taction\n"
+            "1700000000.0\tM1\t10.0.0.5\t52000\t10.0.0.6\t445\tread\n"
+        ),
+        "notice.log": (
+            "#separator \\x09\n"
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tnote\tmsg\tsrc\tdst\tp\tactions\n"
+            "1700000000.0\tN1\t-\t-\t-\t-\ttcp\tScan::Port_Scan\tSaw 100 unique ports\t10.0.0.5\t10.0.0.6\t1234\tNotice::ACTION_LOG\n"
+        ),
+        "weird.log": (
+            "#separator \\x09\n"
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tname\taddl\tsource\n"
+            "1700000000.0\tW1\t10.0.0.5\t52000\t10.0.0.6\t80\trst_with_data\t-\tHTTP\n"
+        ),
+    }
+
+    @pytest.mark.parametrize("log_name", sorted(ZeekImporter.SUPPORTED_LOGS))
+    def test_every_supported_log_yields_an_event(self, log_name, tmp_path):
+        path = tmp_path / log_name
+        path.write_text(self.REPRESENTATIVE[log_name])
+        events = ZeekImporter().read(str(path))
+        assert events, f"{log_name} is advertised but yields no events"
+
+    def test_notice_log_event_fields(self, tmp_path):
+        path = tmp_path / "notice.log"
+        path.write_text(self.REPRESENTATIVE["notice.log"])
+        e = ZeekImporter().read(str(path))[0]
+        assert e.event_type == EventType.NOTICE
+        assert e.severity == Severity.MEDIUM
+        assert e.source_ip == "10.0.0.5"          # id.orig_h empty: src column used
+        assert e.destination_ip == "10.0.0.6"     # id.resp_h empty: dst column used
+        assert e.destination_port == 1234         # p column used
+        assert e.metadata["note"] == "Scan::Port_Scan"
+        assert e.metadata["msg"] == "Saw 100 unique ports"
+        assert e.protocol == Protocol.TCP
+
+    def test_weird_log_event_fields(self, tmp_path):
+        path = tmp_path / "weird.log"
+        path.write_text(self.REPRESENTATIVE["weird.log"])
+        e = ZeekImporter().read(str(path))[0]
+        assert e.event_type == EventType.ANOMALOUS_TRAFFIC
+        assert e.severity == Severity.LOW
+        assert e.source_ip == "10.0.0.5"
+        assert e.destination_ip == "10.0.0.6"
+        assert e.destination_port == 80
+        assert e.metadata["weird"] == "rst_with_data"
+        assert e.metadata["addl"] == "-"
+
+    def test_unhandled_log_type_raises_instead_of_dropping(self):
+        with pytest.raises(ValueError, match="unsupported log type"):
+            ZeekImporter()._convert_row({}, "x11.log")

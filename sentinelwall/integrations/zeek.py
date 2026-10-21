@@ -12,7 +12,7 @@ from sentinelwall.core.events import EventType, NetworkEvent, Protocol, Severity
 
 
 class ZeekImporter:
-    """Imports Zeek logs (conn.log, dns.log, http.log, ssl.log, ssh.log)."""
+    """Imports Zeek logs (see SUPPORTED_LOGS for the handled formats)."""
 
     SUPPORTED_LOGS = {
         "conn.log", "dns.log", "http.log", "ssl.log", "ssh.log", "smb.log",
@@ -94,7 +94,85 @@ class ZeekImporter:
             return self._parse_ssh(row)
         if log_type == "smb.log":
             return self._parse_smb(row)
-        return None
+        if log_type == "notice.log":
+            return self._parse_notice(row)
+        if log_type == "weird.log":
+            return self._parse_weird(row)
+        # Every entry of SUPPORTED_LOGS has a branch above, and read() gates on
+        # that list, so an unhandled type here means the two have drifted and a
+        # silently-dropped format would come back (#19). Fail loudly instead.
+        raise ValueError(
+            f"unsupported log type {log_type!r}; supported: {sorted(self.SUPPORTED_LOGS)}"
+        )
+
+    def _parse_notice(self, row: dict[str, str]) -> NetworkEvent | None:
+        """Convert a Zeek notice.log row (#19).
+
+        notice.log is Zeek's canonical analyst/IDS detection stream; it was in
+        SUPPORTED_LOGS but had no handler, so an import reported success and
+        yielded zero events. Notices carry their own `src`/`dst`/`p` columns,
+        which are set when the id.* connection columns are not ("-").
+        """
+        try:
+            ts = self._parse_ts(row.get("ts", "0"))
+            src = row.get("id.orig_h", "")
+            if not src or src == "-":
+                src = row.get("src", "0.0.0.0")
+            dst = row.get("id.resp_h", "")
+            if not dst or dst == "-":
+                dst = row.get("dst", "0.0.0.0")
+            dport = row.get("id.resp_p", "")
+            if not dport or dport == "-":
+                dport = row.get("p", "0")
+            sport = row.get("id.orig_p", "")
+            sport = 0 if sport in ("", "-") else int(sport)
+            dport = 0 if dport in ("", "-") else int(dport)
+            note = row.get("note", "")
+            msg = row.get("msg", "")
+            return NetworkEvent(
+                timestamp=ts, source_ip=src, destination_ip=dst,
+                source_port=sport,
+                destination_port=dport,
+                protocol=self._protocol_from_str(row.get("proto", "tcp")),
+                event_type=EventType.NOTICE, severity=Severity.MEDIUM,
+                payload_size=len(note) + len(msg),
+                metadata={
+                    "note": note,
+                    "msg": msg,
+                    "peer_descr": row.get("peer_descr", ""),
+                    "actions": row.get("actions", ""),
+                },
+            )
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_weird(self, row: dict[str, str]) -> NetworkEvent | None:
+        """Convert a Zeek weird.log row (#19).
+
+        weird.log logs protocol-level anomalies (RST storms, partial
+        connections, ...); it was in SUPPORTED_LOGS but had no handler and was
+        silently dropped on import.
+        """
+        try:
+            ts = self._parse_ts(row.get("ts", "0"))
+            src = row.get("id.orig_h", "0.0.0.0")
+            dst = row.get("id.resp_h", "0.0.0.0")
+            name = row.get("name", "")
+            return NetworkEvent(
+                timestamp=ts, source_ip=src, destination_ip=dst,
+                source_port=int(row.get("id.orig_p", 0) or 0),
+                destination_port=int(row.get("id.resp_p", 0) or 0),
+                protocol=self._protocol_from_str(row.get("proto", "tcp")),
+                event_type=EventType.ANOMALOUS_TRAFFIC, severity=Severity.LOW,
+                payload_size=len(name),
+                metadata={
+                    "weird": name,
+                    "addl": row.get("addl", ""),
+                    "source": row.get("source", ""),
+                },
+            )
+        except (ValueError, TypeError):
+            return None
 
     def _parse_conn(self, row: dict[str, str]) -> NetworkEvent | None:
         try:
