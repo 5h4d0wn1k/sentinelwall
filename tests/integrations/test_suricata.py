@@ -122,6 +122,7 @@ class TestEdgeCases:
         path = tmp_path / "eve.json"
         path.write_text(json.dumps({
             "event_type": "alert",
+            "timestamp": "2026-01-01T00:00:00.000000+0000",
             "src_ip": "203.0.113.1", "src_port": 1,
             "dest_ip": "192.168.1.5", "dest_port": 80,
             "alert": {"signature": "ET SCAN SYN Portscan Detection", "severity": 3},
@@ -133,6 +134,7 @@ class TestEdgeCases:
         path = tmp_path / "eve.json"
         path.write_text(json.dumps({
             "event_type": "alert",
+            "timestamp": "2026-01-01T00:00:00.000000+0000",
             "src_ip": "10.0.1.5", "src_port": 50000,
             "dest_ip": "185.220.41.99", "dest_port": 443,
             "alert": {"signature": "ET MALWARE C2 Beaconing Detected", "severity": 1},
@@ -145,9 +147,86 @@ class TestEdgeCases:
         path = tmp_path / "eve.json"
         path.write_text(json.dumps({
             "event_type": "alert",
+            "timestamp": "2026-01-01T00:00:00.000000+0000",
             "src_ip": "10.0.1.5", "src_port": 50000,
             "dest_ip": "203.0.113.9", "dest_port": 443,
             "alert": {"signature": "ET POLICY Large Exfil HTTP POST", "severity": 2},
         }))
         e = SuricataImporter().read(str(path))[0]
         assert e.event_type == EventType.EXFILTRATION
+
+class TestUnusableTimestamps:
+    """A record whose timestamp cannot be read is skipped, never stamped now (#18)."""
+
+    def _write(self, tmp_path, records):
+        path = tmp_path / "eve.json"
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        return str(path)
+
+    def test_garbage_timestamp_is_skipped_not_fabricated(self, tmp_path, caplog):
+        import logging as _logging
+
+        path = self._write(tmp_path, [{
+            "event_type": "alert",
+            "timestamp": "NOT-A-TIMESTAMP",
+            "src_ip": "10.0.0.5", "src_port": 1,
+            "dest_ip": "1.2.3.4", "dest_port": 80,
+            "alert": {"signature": "X", "severity": 3},
+        }])
+        with caplog.at_level(_logging.WARNING, logger="sentinelwall.integrations.suricata"):
+            events = SuricataImporter().read(path)
+        assert events == []
+        assert any("unparseable" in r.message and "NOT-A-TIMESTAMP" in r.message
+                   for r in caplog.records)
+
+    def test_missing_timestamp_is_skipped(self, tmp_path):
+        record = {
+            "event_type": "alert",
+            "src_ip": "10.0.0.5", "src_port": 1,
+            "dest_ip": "1.2.3.4", "dest_port": 80,
+            "alert": {"signature": "X", "severity": 3},
+        }
+        events = SuricataImporter().read(self._write(tmp_path, [record]))
+        assert events == []
+
+    def test_empty_timestamp_is_skipped(self, tmp_path):
+        record = {
+            "event_type": "alert", "timestamp": "",
+            "src_ip": "10.0.0.5", "src_port": 1,
+            "dest_ip": "1.2.3.4", "dest_port": 80,
+            "alert": {"signature": "X", "severity": 3},
+        }
+        events = SuricataImporter().read(self._write(tmp_path, [record]))
+        assert events == []
+
+    def test_valid_records_around_a_bad_one_are_kept(self, tmp_path, caplog):
+        import logging as _logging
+
+        good = {
+            "event_type": "alert",
+            "timestamp": "2023-01-01T00:00:00+00:00",
+            "src_ip": "10.0.0.5", "src_port": 1,
+            "dest_ip": "1.2.3.4", "dest_port": 80,
+            "alert": {"signature": "ok", "severity": 3},
+        }
+        bad = dict(good, timestamp="NOT-A-TIMESTAMP")
+        with caplog.at_level(_logging.WARNING, logger="sentinelwall.integrations.suricata"):
+            events = SuricataImporter().read(self._write(tmp_path, [bad, good]))
+        assert len(events) == 1
+        assert str(events[0].timestamp) == "2023-01-01 00:00:00+00:00"
+        assert any("skipped 1 record(s)" in r.message for r in caplog.records)
+
+    def test_parsed_timestamp_is_never_the_wall_clock(self, tmp_path):
+        from datetime import datetime, timezone
+
+        path = self._write(tmp_path, [{
+            "event_type": "alert",
+            "timestamp": "2019-05-05T05:05:05+00:00",
+            "src_ip": "10.0.0.5", "src_port": 1,
+            "dest_ip": "1.2.3.4", "dest_port": 80,
+            "alert": {"signature": "X", "severity": 3},
+        }])
+        before = datetime.now(timezone.utc)
+        e = SuricataImporter().read(path)[0]
+        assert e.timestamp.year == 2019
+        assert abs((e.timestamp - before).total_seconds()) > 3600

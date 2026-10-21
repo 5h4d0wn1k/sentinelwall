@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sentinelwall.core.events import EventType, NetworkEvent, Protocol, Severity
+
+logger = logging.getLogger(__name__)
 
 
 class SuricataImporter:
@@ -29,6 +32,7 @@ class SuricataImporter:
     def read(self, path: str | Path) -> list[NetworkEvent]:
         """Read an eve.json file. Returns list of NetworkEvents."""
         events = []
+        self._skipped_bad_timestamps = 0
         with open(path, "r", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -41,6 +45,11 @@ class SuricataImporter:
                 event = self._convert_record(record)
                 if event:
                     events.append(event)
+        if self._skipped_bad_timestamps:
+            logger.warning(
+                "%s: skipped %d record(s) with a missing or unparseable timestamp",
+                Path(path).name, self._skipped_bad_timestamps,
+            )
         return events
 
     def _convert_record(self, record: dict[str, Any]) -> NetworkEvent | None:
@@ -88,8 +97,11 @@ class SuricataImporter:
             event_type = EventType.EXFILTRATION
         elif "lateral" in signature:
             event_type = EventType.LATERAL_MOVEMENT
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=src, destination_ip=dst,
             source_port=sport, destination_port=dport,
             protocol=self._protocol_from_str(proto),
@@ -104,8 +116,11 @@ class SuricataImporter:
         query = dns.get("query", "")
         type_name = dns.get("type", "query")
         event_type = EventType.DNS_RESPONSE if type_name == "answer" else EventType.DNS_QUERY
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=record.get("src_ip", "0.0.0.0"),
             destination_ip=record.get("dest_ip", "0.0.0.0"),
             source_port=int(record.get("src_port", 0)),
@@ -128,8 +143,11 @@ class SuricataImporter:
         method = http.get("http_method", "")
         status = http.get("status", 0)
         event_type = EventType.HTTP_REQUEST if method else EventType.HTTP_RESPONSE
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=record.get("src_ip", "0.0.0.0"),
             destination_ip=record.get("dest_ip", "0.0.0.0"),
             source_port=int(record.get("src_port", 0)),
@@ -145,8 +163,11 @@ class SuricataImporter:
 
     def _parse_tls(self, record: dict[str, Any]) -> NetworkEvent | None:
         tls = record.get("tls", {})
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=record.get("src_ip", "0.0.0.0"),
             destination_ip=record.get("dest_ip", "0.0.0.0"),
             source_port=int(record.get("src_port", 0)),
@@ -168,8 +189,11 @@ class SuricataImporter:
         payload_size = bytes_toserver + bytes_toclient
         event_type = EventType.DATA_TRANSFER if payload_size > 10000 else EventType.CONNECTION
         severity = Severity.MEDIUM if payload_size > 100000 else Severity.INFORMATIONAL
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=record.get("src_ip", "0.0.0.0"),
             destination_ip=record.get("dest_ip", "0.0.0.0"),
             source_port=int(record.get("src_port", 0)),
@@ -189,8 +213,11 @@ class SuricataImporter:
         auth_success = ssh.get("auth_success", "failed")
         event_type = EventType.SSH_AUTH if auth_success == "success" else EventType.AUTH_FAILURE
         severity = Severity.INFORMATIONAL if auth_success == "success" else Severity.MEDIUM
+        ts = self._parse_timestamp(record.get("timestamp", ""))
+        if ts is None:
+            return None
         return NetworkEvent(
-            timestamp=self._parse_timestamp(record.get("timestamp", "")),
+            timestamp=ts,
             source_ip=record.get("src_ip", "0.0.0.0"),
             destination_ip=record.get("dest_ip", "0.0.0.0"),
             source_port=int(record.get("src_port", 0)),
@@ -204,13 +231,26 @@ class SuricataImporter:
             },
         )
 
-    def _parse_timestamp(self, ts: str) -> datetime:
+    def _parse_timestamp(self, ts: str) -> datetime | None:
+        """Parse an EVE `timestamp`; None (record skipped) when it cannot be read.
+
+        The previous fallback returned `datetime.now(timezone.utc)`, so a
+        malformed or missing timestamp silently stamped the event at analysis
+        time and injected it into a historical capture's time windows
+        (brute-force, beaconing, scan cooldowns) with no marker (#18). A
+        None return makes the caller skip the record instead, and both the
+        per-record and the per-file warnings leave a trace.
+        """
         if not ts:
-            return datetime.now(timezone.utc)
+            self._skipped_bad_timestamps = getattr(self, "_skipped_bad_timestamps", 0) + 1
+            logger.warning("Suricata record without a timestamp; skipped")
+            return None
         try:
             return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except ValueError:
-            return datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            self._skipped_bad_timestamps = getattr(self, "_skipped_bad_timestamps", 0) + 1
+            logger.warning("unparseable Suricata timestamp %r; record skipped", ts)
+            return None
 
     def _protocol_from_str(self, proto: str) -> Protocol:
         proto = proto.lower()
